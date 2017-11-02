@@ -1,0 +1,148 @@
+---
+title: "Predicting exercise mistakes with classification trees"
+author: "Magdalena Paszko"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, include=TRUE, cache=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 3.5, fig.width = 7) 
+```
+
+This paper is the final project in the Coursera's Practical Machine Learning course (a part of Data Science specialization by Johns Hopkins University) in which we use classification tree algorithms to predict common mistakes in unilateral dumbbell biceps curl.
+
+Software used was R 3.4.1 with caret package.
+
+# Data overview
+
+Weight Lifting Exercises Dataset used in this analysis comes from a human activity recognition research experiment described in:
+
+*Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013*
+
+The categories in focus are fashions in which a biceps curl is performed:
+
+A - exactly according to the specification
+
+B - throwing the elbows to the front
+
+C - lifting the dumbbell only halfway
+
+D - lowering the dumbbell only halfway
+
+E - throwing the hips to the front
+
+
+Potential predictors are sensor records from subject's arm, forearm and belt as well as from dumbbell itself. In the original dataset there are 152 of them. We decided to exclude predictors that represent summary statistics on raw records (standard deviation, variance, average, minimum, maximum, amplitude, kurtosis, skewness and total), given the fact that they contain many missing values. We also exclude predictors that are highly correlated with some other explanatory variables (Pearson's correlation coefficient greater than 0.9), as collinearity might inflate the model variance. Finally, from the original dataset we exclude also all other variables that are not sensor records (timestamp, subject's name, etc.).
+
+```{r data_preparation}
+library(caret)
+train_raw <- read.csv("pml-training.csv")
+allcols <- names(train_raw)
+## exclude summary columns as they contain NAs
+cols <- allcols[!grepl(("^min|^max|^avg|^var|stddev|^amplitude|^kurtosis|^skewness|^total"), allcols)]
+## exclude first seven non relevant variables
+cols <- cols[-(1:7)]
+##create the training dataset
+df_train <- train_raw[,cols]
+## remove highly correlated predictors
+df_train <- df_train[,-findCorrelation(cor(df_train[,-49]), .9)]
+
+```
+
+The final training dataset contains thus the predicted variable classe and 42 predictors across 19 622 observations with no missing values.
+
+# Model fitting
+
+We tested three types of machine learning algorithms with different levels of complexity: a simple **classification tree**, **bagged trees** and **random forest**. 
+Our focus was to find a model with greatest predictive accuracy and each time we estimated out-of-sample accuracy with an appropriate technique.
+
+We do not perform any pre-processing of the data for performance reasons.
+
+### Single classification tree
+We start with the basic algorithm. We fit a single classification tree using a popular 10-fold cross-validation resamples for test accuracy estimation. In order to tune the model, we check for different values of the complexity parameter (cp).
+
+```{r cp}
+ctrl <- trainControl(method="cv", number=10)
+cpGrid <-  expand.grid(cp = seq(0.01,0.99, by=0.01))
+fit1 <- train(classe~.,
+                 method="rpart",
+                 data=df_train,
+                 trControl=ctrl,
+                 tuneGrid=cpGrid
+)
+
+yhat1 <- predict(fit1)
+
+ggplot(data=fit1$results, aes(x=cp, y=Accuracy))+
+  geom_line()+
+  geom_point()+
+  labs(y="Accuracy (10-fold Cross-Validation)")
+
+data.frame("train"=confusionMatrix(df_train$classe, yhat1)$overall["Accuracy"],
+          "10fold.CV.test"=max(fit1$results["Accuracy"]))
+```
+
+The best test accuracy result is reported for the lowest cp value (cp=0.01). Still, this is a mere 72%, and the training accuracy is also low - 70%. We consider that this result is not satisfactory.
+
+
+### Trees with bootstrap aggregation
+Next, we fit a classification tree bootstrap aggregation (bagging) model with 25 iterations. For test accuracy estimation we use out-of-bag technique. It is a straightforward method unique for bagging algorithm that uses for testing observations unused in fitting the model in each iteration. This is very efficient since it lets us avoid splitting the training set as in cross-validation methods. 
+
+```{r bagging}
+bag_ctrl <- trainControl(method="oob")
+set.seed(1)
+fit2 <- train(classe~.,
+              method="treebag",
+              data=df_train,
+              trControl=bag_ctrl,
+              nbagg=25,
+              keepX = TRUE)
+
+yhat2 <- predict(fit2, df_train)
+
+data.frame("train"=confusionMatrix(yhat2, df_train$classe)$overall["Accuracy"],
+      "oob.test"=unlist(fit2$results["Accuracy"]))
+
+```
+
+The model's predictive quality has improved considerably compared to a single classification tree. The final model's training accuracy is almost 100% of correct classifications and the estimated out-of-bag test accuracy is 95%.
+
+### Random forest
+Finally, we fit a random forest model using 10 bagging iterations with, again, out-of-bag technique for test accuracy estimation. Although the default value for the number of random predictors at each split (mtry) is the square root of the number of predictors ($\sqrt42 \approx 6.5$), we check for different values of this tuning parameter.
+
+```{r random_forest}
+rf_ctrl <- trainControl(method="oob")
+cpGrid3 <-  expand.grid(mtry = seq(2,42, by=2))
+
+set.seed(1)
+fit3 <- train(classe~.,
+              method="rf",
+              data=df_train,
+              trControl=rf_ctrl,
+              nbagg=10,
+              keepX=TRUE,
+              tuneGrid=cpGrid3)
+
+yhat3 <- predict(fit3, df_train)
+
+ggplot(data=fit3$results, aes(x=mtry, y=Accuracy))+
+  geom_line()+
+  geom_point()+
+  labs(y="Accuracy (Out-Of-Bag)")
+
+data.frame("train"=confusionMatrix(yhat3, df_train$classe)$overall["Accuracy"],
+           "oob.test"=max(unlist(fit3$results["Accuracy"])))
+
+```
+
+The best out-of-bag test accuracy was obtained for 6 random variables at each node (which is consistent with the default value), although all the results are very good with an estimated test accuracy at over 99%. The final model has also 100% correct classifications on the training dataset.
+
+In order to get an idea of the importance of different predictors in the random forest model, we plot the top 15 predictors and their relative importance below.
+
+```{r var_imp}
+plot(varImp(fit3), top=15)
+```
+
+# Conclusions
+Using three different classification tree algorithms to predict mistakes in biceps curl, we can state that **random forests** have the highest predictive value as measured with test accuracy. Our random forest model with 10 bagging iterations and 6 variables randomly sampled at each split gives an estimated accuracy of over 99%.
+
+
